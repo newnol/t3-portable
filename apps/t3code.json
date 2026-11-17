@@ -13,5 +13,6 @@
   "smoke": {
     "mode": "not-verified",
     "reason": "Windows GUI test not yet automated; downstream CLIs and WSL may be external"
-  }
+  },
+  "min_size_mb": 30
 }
