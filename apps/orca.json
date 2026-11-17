@@ -15,6 +15,14 @@
     "mode": "folder-process",
     "executable": "Orca.exe",
     "process_name": "Orca.exe",
-    "wait_seconds": 30
-  }
+    "wait_seconds": 30,
+    "env": {
+      "ORCA_BACKGROUND_LAUNCH": "1",
+      "ORCA_STARTUP_DIAGNOSTICS": "1",
+      "ORCA_DIAGNOSTICS_TOKEN_URL": ""
+    },
+    "startup_log_env": "ORCA_STARTUP_DIAGNOSTICS_FILE",
+    "startup_log_marker": "[bootstrap] bundle-enter"
+  },
+  "min_size_mb": 30
 }
