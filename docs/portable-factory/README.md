@@ -52,7 +52,7 @@ Prefer an exact reviewed commit SHA when reproducibility or supply-chain control
 | Build and native dependency validation | Yes | App-specific adapter |
 | Unpacked folder shape, DLLs, resources and minimum size | Yes | Per-app manifest |
 | SHA-256 checksum | Yes | `SHA256SUMS.txt` |
-| Windows process/boot smoke | Per app | Orca ZIP tested; T3 Code explicitly `not-verified` |
+| Windows process/boot smoke | Per app | Orca native folder tested; T3 Code explicitly `not-verified` |
 | GUI appearance, login and workflows | Manual | CI runner cannot prove these |
 | Code signing | Not yet | Artifacts are unsigned |
 | GitHub Release publishing | Disabled | Requires explicit review and a separate approval/signing design |
