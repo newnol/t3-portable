@@ -1,0 +1,25 @@
+name: Portable Factory - Build App
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_id:
+        description: "Registered app ID (apps/*.json), e.g. orca or t3code"
+        type: string
+        required: true
+        default: "orca"
+      upstream_ref:
+        description: "Optional upstream tag/branch/commit. Empty = app default"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/_portable-windows.yml
+    with:
+      app_id: ${{ inputs.app_id }}
+      upstream_ref: ${{ inputs.upstream_ref }}
