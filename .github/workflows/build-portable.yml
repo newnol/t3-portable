@@ -127,7 +127,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $versionArgs = @()
-          if ($env:UPSTREAM_REF -match '^v([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)
+          if ($env:UPSTREAM_REF.StartsWith('v') -and $env:UPSTREAM_REF.Length -gt 1) {
+            $version = $env:UPSTREAM_REF.Substring(1)
+            if ($version -match '^[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?$') {
+              $versionArgs = @('--build-version', $version)
+              Write-Host "Using upstream release version $version"
+            }
+          }
+          vp run dist:desktop:artifact --platform win --target portable --arch x64 --output-dir release-portable --verbose @versionArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Windows portable build failed' }
       - name: Verify and prepare downloadable files
         shell: pwsh
         run: |
