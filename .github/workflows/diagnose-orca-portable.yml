@@ -1,6 +1,9 @@
 name: Diagnose Orca Portable Windows startup
 
 on:
+  workflow_run:
+    workflows: ["Build Orca Portable (Windows x64)"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       source_run:
@@ -19,6 +22,7 @@ permissions:
 
 jobs:
   startup-smoke:
+    if: ${{ github.event_name != 'workflow_run' }}
     runs-on: windows-2022
     timeout-minutes: 15
     env:
@@ -107,6 +111,63 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Orca-Portable-Startup-Diagnostics
+          path: diagnostics/*
+          if-no-files-found: warn
+          retention-days: 14
+
+  unpacked-folder-smoke:
+    name: Test unpacked Orca folder from completed build
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' }}
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download the same build's folder ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: Orca-Portable-Folder-Windows-x64
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: artifact
+
+      - name: Extract folder and verify startup without an installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path diagnostics | Out-Null
+          $zip = @(Get-ChildItem artifact -Filter '*.zip' -File)
+          if ($zip.Count -ne 1) { throw "Expected one app ZIP, found $($zip.Count)" }
+          Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath folder -Force
+          $exe = @(Get-ChildItem folder -Recurse -Filter Orca.exe -File | Where-Object {
+            $_.DirectoryName -notmatch '[\\/]resources([\\/]|$)'
+          })
+          if ($exe.Count -ne 1) { throw "Expected one desktop Orca.exe, found $($exe.Count)" }
+          $app = $exe[0].FullName
+          $env:ORCA_BACKGROUND_LAUNCH = '1'
+          $env:ORCA_STARTUP_DIAGNOSTICS = '1'
+          $env:ORCA_STARTUP_DIAGNOSTICS_FILE = (Join-Path (Resolve-Path diagnostics).Path 'folder-bootstrap.log')
+          $p = Start-Process -FilePath $app -WorkingDirectory (Split-Path $app) -PassThru
+          Write-Host "Folder app PID: $($p.Id)"
+          Start-Sleep -Seconds 30
+          $p.Refresh()
+          $running = @(Get-CimInstance Win32_Process -Filter "Name = 'Orca.exe'" | Where-Object {
+            $_.ExecutablePath -like "*folder*"
+          } | Select-Object Name, ProcessId, ParentProcessId, ExecutablePath)
+          $running | Format-Table -AutoSize
+          $running | ConvertTo-Json -Depth 4 | Set-Content diagnostics/folder-processes.json
+          if (Test-Path $env:ORCA_STARTUP_DIAGNOSTICS_FILE) {
+            Get-Content $env:ORCA_STARTUP_DIAGNOSTICS_FILE -Tail 80
+          }
+          if ($running.Count -eq 0) { throw 'Orca folder ZIP did not keep an app process alive on Windows' }
+          Write-Host 'Folder ZIP Windows runtime smoke check passed (GUI visibility not tested)'
+
+      - name: Upload folder startup diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orca-Folder-Startup-Diagnostics
           path: diagnostics/*
           if-no-files-found: warn
           retention-days: 14
