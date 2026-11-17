@@ -38,6 +38,7 @@ if (-not (Test-Path -LiteralPath $resources -PathType Leaf)) {
 }
 $files = @(Get-ChildItem -LiteralPath $payload -File -Recurse -Force)
 # Hidden runtime files must be preserved, but common private credentials cannot be published.
+$blockedPaths = [System.Collections.Generic.List[string]]::new()
 foreach ($file in $files) {
   $relative = $file.FullName.Substring($payload.Length).TrimStart([char]'\', [char]'/').Replace('\', '/')
   $segments = $relative.Split([char]'/')
@@ -46,8 +47,12 @@ foreach ($file in $files) {
   $blockedNames = @('.env', '.env.local', '.env.production', '.npmrc', '.pypirc', 'id_rsa', 'id_ed25519')
   $blocked = @($segments | Where-Object { $_ -in $blockedFolders }).Count -gt 0
   if ($blocked -or $basename -in $blockedNames -or $file.Extension.ToLowerInvariant() -in @('.p12', '.pfx')) {
-    throw "Refusing to publish potentially sensitive bundled file: $relative"
+    $blockedPaths.Add($relative)
   }
+}
+if ($blockedPaths.Count -gt 0) {
+  $blockedPaths | Sort-Object | ForEach-Object { Write-Host "::warning::Blocked bundled credential path: $_" }
+  throw "Refusing to publish $($blockedPaths.Count) secret-like file paths from the application payload"
 }
 $nativeDlls = @($files | Where-Object { $_.Extension -eq '.dll' })
 if ($nativeDlls.Count -eq 0) {
