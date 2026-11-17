@@ -15,7 +15,7 @@ ID = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 TOOLCHAINS = {"pnpm-bun-native", "vite-plus-rust"}
-FORMATS = {"exe", "zip"}
+FORMATS = {"folder"}
 
 
 def validate_ref(value: str) -> str:
@@ -45,8 +45,8 @@ def load_app(path: Path) -> dict:
     formats = data.get("formats")
     if not isinstance(formats, list) or not formats or len(formats) != len(set(formats)):
         raise ValueError(f"{path}: formats must be a unique nonempty list")
-    if not set(formats).issubset(FORMATS) or data.get("preferred_format") not in formats:
-        raise ValueError(f"{path}: unknown/invalid package format")
+    if formats != ["folder"] or data.get("preferred_format") != "folder":
+        raise ValueError(f"{path}: Portable Factory requires a folder output (no self-extracting EXE)")
     min_size = data.get("min_size_mb")
     if not isinstance(min_size, int) or isinstance(min_size, bool) or not 1 <= min_size <= 4096:
         raise ValueError(f"{path}: min_size_mb must be an integer from 1 to 4096")
@@ -54,8 +54,8 @@ def load_app(path: Path) -> dict:
     if not isinstance(smoke, dict) or smoke.get("mode") not in {"folder-process", "not-verified"}:
         raise ValueError(f"{path}: unsupported smoke test mode")
     if smoke["mode"] == "folder-process":
-        if "zip" not in formats or not re.fullmatch(r"[A-Za-z0-9_.-]+[.]exe", smoke.get("executable", "")):
-            raise ValueError(f"{path}: folder-process requires ZIP and a safe executable")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+[.]exe", smoke.get("executable", "")):
+            raise ValueError(f"{path}: folder-process requires a safe root executable")
         if smoke.get("process_name") != smoke["executable"]:
             raise ValueError(f"{path}: process_name must match executable")
         if not isinstance(smoke.get("wait_seconds"), int) or not 5 <= smoke["wait_seconds"] <= 90:
