@@ -90,13 +90,104 @@ jobs:
           vp install
           if ($LASTEXITCODE -ne 0) { throw "vp install failed" }
 
+      # Upstream enforces a compact <80-file unpacked layout tuned for NSIS.
+      # The portable wrapper currently produces 89 files. Raise the limit ONLY
+      # for portable builds; keep the native-module and self-contained checks.
+      # Fail rather than silently skipping this adjustment if upstream changes.
+      - name: Allow portable-specific unpacked file count
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = (Resolve-Path 'scripts/build-desktop-artifact.ts').Path
+          $source = [System.IO.File]::ReadAllText($script)
+          $needle = @'
+      targetArch: options.arch,
+      appVersion,
+      expectWslRuntime:
+'@
+          $replacement = @'
+      targetArch: options.arch,
+      appVersion,
+      fileLimit: options.target === "portable" ? 100 : undefined,
+      expectWslRuntime:
+'@
+          if (-not $source.Contains($needle) -or $source.IndexOf($needle) -ne $source.LastIndexOf($needle)) {
+            throw 'Upstream Windows validator changed; review before patching'
+          }
+          $patched = $source.Replace($needle, $replacement)
+          [System.IO.File]::WriteAllText($script, $patched, [System.Text.UTF8Encoding]::new($false))
+          Write-Host 'Portable-only file limit: 100 (standard targets retain upstream 80)'
+
       - name: Build portable Windows executable
         working-directory: upstream
         shell: pwsh
         env:
           T3CODE_DISABLE_AUTO_UPDATE: "true"
         run: |
-          vp run dist:desktop:artifact --platform win --target portable --arch x64 --output-dir release-portable --verbose
+          $ErrorActionPreference = 'Stop'
+          $versionArgs = @()
+          if ($env:UPSTREAM_REF -match '^v([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)
+      - name: Verify and prepare downloadable files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE 'upstream\release-portable'
+          if (-not (Test-Path $releaseDir)) { throw "No release-portable directory" }
+          $candidates = @(Get-ChildItem -LiteralPath $releaseDir -File -Filter 'T3-Code-*-x64.exe')
+          if ($candidates.Count -ne 1) {
+            throw "Expected exactly one Windows x64 executable, found $($candidates.Count)"
+          }
+          if ($candidates[0].Length -lt 50MB) { throw "Portable executable is unexpectedly small" }
+          $outputDir = Join-Path $env:GITHUB_WORKSPACE 'portable-output'
+          New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
+          $portableExe = Join-Path $outputDir 'T3-Code-Portable-x64.exe'
+          Copy-Item -LiteralPath $candidates[0].FullName -Destination $portableExe
+          $hash = (Get-FileHash -LiteralPath $portableExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  T3-Code-Portable-x64.exe" | Set-Content -LiteralPath (Join-Path $outputDir 'SHA256SUMS.txt') -Encoding ascii
+          @(
+            "Source: https://github.com/pingdotgg/t3code"
+            "Upstream ref: $env:UPSTREAM_REF"
+            "Upstream SHA: $env:UPSTREAM_SHA"
+            "Platform: Windows x64"
+            "Target: electron-builder portable"
+            "Build UTC: $([DateTime]::UtcNow.ToString('u'))"
+            "Signed: no"
+          ) | Set-Content -LiteralPath (Join-Path $outputDir 'BUILD-INFO.txt') -Encoding utf8
+          $launcher = @(
+            '@echo off'
+            'setlocal EnableExtensions DisableDelayedExpansion'
+            'set "PORTABLE_ROOT=%~dp0"'
+            'set "T3CODE_HOME=%PORTABLE_ROOT%Data\T3"'
+            'set "APPDATA=%PORTABLE_ROOT%Data\Roaming"'
+            'set "LOCALAPPDATA=%PORTABLE_ROOT%Data\Local"'
+            'set "T3CODE_DISABLE_AUTO_UPDATE=true"'
+            'if not exist "%T3CODE_HOME%" mkdir "%T3CODE_HOME%"'
+            'if not exist "%APPDATA%" mkdir "%APPDATA%"'
+            'if not exist "%LOCALAPPDATA%" mkdir "%LOCALAPPDATA%"'
+            'start "" "%PORTABLE_ROOT%T3-Code-Portable-x64.exe"'
+          )
+          [System.IO.File]::WriteAllText(
+            (Join-Path $outputDir 'Run-T3Code-Portable.cmd'),
+            (($launcher -join "`r`n") + "`r`n"),
+            [System.Text.Encoding]::ASCII
+          )
+          Write-Host "Portable executable: $([Math]::Round($candidates[0].Length / 1MB, 1)) MiB"
+          Write-Host "SHA256: $hash"
+
+      - name: Upload Windows portable app
+        uses: actions/upload-artifact@v4
+        with:
+          name: T3-Code-Portable-Windows-x64
+          path: portable-output/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+) {
+            $versionArgs = @('--build-version', $Matches[1])
+            Write-Host "Using upstream release version $($Matches[1])"
+          }
+          vp run dist:desktop:artifact --platform win --target portable --arch x64 --output-dir release-portable --verbose @versionArgs
           if ($LASTEXITCODE -ne 0) { throw "Windows portable build failed" }
 
       - name: Verify and prepare downloadable files
