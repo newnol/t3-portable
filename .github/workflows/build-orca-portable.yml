@@ -1,0 +1,180 @@
+name: Build Orca Portable (Windows x64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Orca upstream tag, branch or full commit SHA"
+        required: true
+        type: string
+        default: "v1.4.261"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-orca-portable.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orca-portable-${{ github.ref }}-${{ inputs.upstream_ref || 'v1.4.261' }}
+  cancel-in-progress: false
+
+jobs:
+  portable-windows:
+    name: Orca portable / Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      UPSTREAM_REF: ${{ inputs.upstream_ref || 'v1.4.261' }}
+      CI: "true"
+      ORCA_BACKGROUND_LAUNCH: "1"
+      NODE_OPTIONS: "--max-old-space-size=4096"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      ORCA_REQUIRE_ORCAD_TEMPLATE: "0"
+    steps:
+      - name: Enable long paths on Windows
+        shell: pwsh
+        run: git config --global core.longpaths true
+
+      - name: Checkout Orca upstream
+        uses: actions/checkout@v4
+        with:
+          repository: stablyai/orca
+          ref: ${{ env.UPSTREAM_REF }}
+          path: upstream
+          fetch-depth: 1
+          filter: blob:none
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Record upstream revision and verify release source
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sha = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sha.Length -ne 40) { throw 'Unable to resolve Orca source commit' }
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          $version = [string]$pkg.version
+          if ($env:UPSTREAM_REF.StartsWith('v') -and $env:UPSTREAM_REF.Substring(1) -match '^[0-9]+[.][0-9]+[.][0-9]+$') {
+            if ($env:UPSTREAM_REF.Substring(1) -ne $version) {
+              throw "Selected release $env:UPSTREAM_REF does not match package version $version"
+            }
+          }
+          "ORCA_UPSTREAM_SHA=$sha" >> $env:GITHUB_ENV
+          "ORCA_SOURCE_VERSION=$version" >> $env:GITHUB_ENV
+          "ORCA_BUILD_COMMIT=$sha" >> $env:GITHUB_ENV
+          Write-Host "Orca $version from stablyai/orca@$sha"
+
+      - name: Setup pnpm (upstream version)
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: upstream/package.json
+          run_install: false
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: upstream/pnpm-lock.yaml
+
+      - name: Setup Bun (upstream pinned version)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: upstream/config/.bun-version
+
+      - name: Setup Python for native addons
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Report build environment
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node --version
+          pnpm --version
+          bun --version
+          python --version
+          git --version
+          Get-PSDrive C | Format-Table -AutoSize
+
+      - name: Install root dependencies (including Windows native addons)
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Orca root dependency install failed' }
+
+      - name: Install mobile web build dependencies
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          pnpm -C mobile install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Orca mobile dependency install failed' }
+
+      - name: Build Orca release application and native components
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          pnpm run build:release
+          if ($LASTEXITCODE -ne 0) { throw 'Orca release build failed' }
+
+      - name: Ensure Electron native runtime
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          pnpm run ensure:electron-runtime
+          if ($LASTEXITCODE -ne 0) { throw 'Orca Electron native verification failed' }
+
+      - name: Package Windows x64 portable EXE
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          pnpm exec electron-builder --config config/electron-builder.config.cjs --win portable --x64 --publish never --config.directories.output=dist-portable
+          if ($LASTEXITCODE -ne 0) { throw 'Orca electron-builder portable packaging failed' }
+
+      - name: Verify Windows portable payload and create checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:GITHUB_WORKSPACE 'upstream/dist-portable'
+          if (-not (Test-Path $dir)) { throw "Portable distribution directory missing: $dir" }
+          $files = @(Get-ChildItem -LiteralPath $dir -File -Filter '*.exe')
+          if ($files.Count -ne 1) {
+            throw "Expected exactly one top-level portable EXE, found $($files.Count): $($files.Name -join ', ')"
+          }
+          if ($files[0].Length -lt 50MB) { throw 'Portable EXE unexpectedly small' }
+          $out = Join-Path $env:GITHUB_WORKSPACE 'orca-portable-output'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $name = "Orca-Portable-$($env:ORCA_SOURCE_VERSION)-Windows-x64.exe"
+          $dest = Join-Path $out $name
+          Copy-Item -LiteralPath $files[0].FullName -Destination $dest -ErrorAction Stop
+          $hash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
+          @(
+            "Upstream: https://github.com/stablyai/orca"
+            "Tag or branch: $env:UPSTREAM_REF"
+            "Source commit: $env:ORCA_UPSTREAM_SHA"
+            "Version: $env:ORCA_SOURCE_VERSION"
+            "Target: electron-builder portable"
+            "Architecture: Windows x64"
+            "Signed: no"
+            "Build time UTC: $([DateTime]::UtcNow.ToString('u'))"
+            "Note: the portable app can launch without installation; application settings and CLI credentials may still use the Windows user profile"
+          ) | Set-Content -LiteralPath (Join-Path $out 'BUILD-INFO.txt') -Encoding utf8
+          Write-Host "$name ($([Math]::Round($files[0].Length / 1MB, 1)) MiB) SHA256=$hash"
+
+      - name: Upload Orca Windows portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orca-Portable-Windows-x64
+          path: orca-portable-output/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
