@@ -11,6 +11,7 @@ $factory = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $manifest = Get-Content (Join-Path $factory "apps/$AppId.json") -Raw | ConvertFrom-Json
 $OutputDir = (Resolve-Path $OutputDir).Path
 $binary = @(Get-ChildItem -LiteralPath $OutputDir -File | Where-Object { $_.Extension -in @('.exe', '.zip') })
+$minSizeMb = [int]$manifest.min_size_mb
 $formats = @($manifest.formats)
 $expectedCount = $formats.Count
 if ($binary.Count -ne $expectedCount) {
@@ -20,7 +21,7 @@ foreach ($format in $formats) {
   $extension = if ($format -eq 'exe') { '.exe' } else { '.zip' }
   $matches = @($binary | Where-Object { $_.Extension -eq $extension })
   if ($matches.Count -ne 1) { throw "Expected one .$format artifact" }
-  if ($matches[0].Length -lt 50MB) { throw "Artifact $($matches[0].Name) is unexpectedly small" }
+  if ($matches[0].Length -lt ($minSizeMb * 1MB)) { throw "Artifact $($matches[0].Name) is smaller than $minSizeMb MiB" }
 }
 $smokeResult = 'not-verified'
 $notes = [string]$manifest.smoke.reason
@@ -42,10 +43,13 @@ if ($manifest.smoke.mode -eq 'folder-process') {
   Expand-Archive -LiteralPath $archive.FullName -DestinationPath $unpack -Force
   $exePath = Join-Path $unpack $expectedExe
   if (-not (Test-Path $exePath)) { throw 'Unpacked app executable is missing' }
-  $env:ORCA_BACKGROUND_LAUNCH = '1'
-  $env:ORCA_STARTUP_DIAGNOSTICS = '1'
-  $env:ORCA_STARTUP_DIAGNOSTICS_FILE = Join-Path $logDir 'bootstrap.log'
-  $env:ORCA_DIAGNOSTICS_TOKEN_URL = ''
+  foreach ($entry in $manifest.smoke.env.PSObject.Properties) {
+    [Environment]::SetEnvironmentVariable([string]$entry.Name, [string]$entry.Value, 'Process')
+  }
+  $startupLog = Join-Path $logDir 'bootstrap.log'
+  if ($manifest.smoke.startup_log_env) {
+    [Environment]::SetEnvironmentVariable([string]$manifest.smoke.startup_log_env, $startupLog, 'Process')
+  }
   $process = Start-Process -FilePath $exePath -WorkingDirectory $unpack -PassThru -ErrorAction Stop
   Write-Host "Windows smoke: started $exePath (PID $($process.Id))"
   Start-Sleep -Seconds ([int]$manifest.smoke.wait_seconds)
@@ -56,15 +60,15 @@ if ($manifest.smoke.mode -eq 'folder-process') {
   $live | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath | ConvertTo-Json -Depth 4 |
     Set-Content -Path (Join-Path $logDir 'processes.json') -Encoding utf8
   if ($live.Count -eq 0) { throw 'Windows startup smoke failed: no unpacked app process survived' }
-  if (-not (Test-Path $env:ORCA_STARTUP_DIAGNOSTICS_FILE)) {
-    throw 'Windows smoke did not reach Orca Electron bootstrap'
-  }
-  $bootLog = Get-Content -LiteralPath $env:ORCA_STARTUP_DIAGNOSTICS_FILE -Raw
-  if (-not $bootLog.Contains('[bootstrap] bundle-enter')) {
-    throw 'Windows smoke did not enter the Orca bootstrap bundle'
+  if ($manifest.smoke.startup_log_marker) {
+    if (-not (Test-Path $startupLog)) { throw 'Windows smoke did not create a startup log' }
+    $bootLog = Get-Content -LiteralPath $startupLog -Raw
+    if (-not $bootLog.Contains([string]$manifest.smoke.startup_log_marker)) {
+      throw 'Windows smoke did not produce the required startup marker'
+    }
   }
   $smokeResult = 'process-smoke-passed'
-  $notes = 'A Windows CI runner started the unpacked application and observed its bootstrap and live process. GUI visibility and user settings are not verified.'
+  $notes = 'A Windows CI runner started the unpacked application, observed its live process and any configured log marker. GUI visibility and user settings are not verified.'
   Write-Host "Windows smoke passed: $($live.Count) app processes"
   # The Windows runner is disposable; allow Actions to clean up child processes.
 } elseif ($manifest.smoke.mode -eq 'not-verified') {
