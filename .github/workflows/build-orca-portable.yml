@@ -29,7 +29,6 @@ jobs:
     env:
       UPSTREAM_REF: ${{ inputs.upstream_ref || 'v1.4.261' }}
       CI: "true"
-      ORCA_BACKGROUND_LAUNCH: "1"
       NODE_OPTIONS: "--max-old-space-size=4096"
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
       ORCA_REQUIRE_ORCAD_TEMPLATE: "0"
@@ -136,7 +135,7 @@ jobs:
         working-directory: upstream
         shell: pwsh
         run: |
-          pnpm exec electron-builder --config config/electron-builder.config.cjs --win portable --x64 --publish never --config.directories.output=dist-portable
+          pnpm exec electron-builder --config config/electron-builder.config.cjs --win portable zip --x64 --publish never --config.directories.output=dist-portable
           if ($LASTEXITCODE -ne 0) { throw 'Orca electron-builder portable packaging failed' }
 
       - name: Verify Windows portable payload and create checksum
@@ -150,6 +149,53 @@ jobs:
             throw "Expected exactly one top-level portable EXE, found $($files.Count): $($files.Name -join ', ')"
           }
           if ($files[0].Length -lt 50MB) { throw 'Portable EXE unexpectedly small' }
+          $folderArchives = @(Get-ChildItem -LiteralPath $dir -File -Filter '*.zip')
+          if ($folderArchives.Count -ne 1) {
+            throw "Expected exactly one Windows folder ZIP, found $($folderArchives.Count)"
+          }
+          if ($folderArchives[0].Length -lt 50MB) { throw 'Portable ZIP unexpectedly small' }
+          $expectedUnpacked = Join-Path $dir 'win-unpacked/Orca.exe'
+          if (-not (Test-Path $expectedUnpacked)) { throw 'Unpacked Orca.exe missing' }
+          $archivePaths = @(tar -tf $folderArchives[0].FullName)
+          if ($LASTEXITCODE -ne 0 -or @($archivePaths | Where-Object { $_ -match '(^|/)Orca[.]exe
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $name = "Orca-Portable-$($env:ORCA_SOURCE_VERSION)-Windows-x64.exe"
+          $dest = Join-Path $out $name
+          Copy-Item -LiteralPath $files[0].FullName -Destination $dest -ErrorAction Stop
+          $hash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
+          @(
+            "Upstream: https://github.com/stablyai/orca"
+            "Tag or branch: $env:UPSTREAM_REF"
+            "Source commit: $env:ORCA_UPSTREAM_SHA"
+            "Version: $env:ORCA_SOURCE_VERSION"
+            "Target: electron-builder portable"
+            "Architecture: Windows x64"
+            "Signed: no"
+            "Build time UTC: $([DateTime]::UtcNow.ToString('u'))"
+            "Note: the portable app can launch without installation; application settings and CLI credentials may still use the Windows user profile"
+          ) | Set-Content -LiteralPath (Join-Path $out 'BUILD-INFO.txt') -Encoding utf8
+          Write-Host "$name ($([Math]::Round($files[0].Length / 1MB, 1)) MiB) SHA256=$hash"
+          $folderOut = Join-Path $env:GITHUB_WORKSPACE 'orca-portable-folder-output'
+          New-Item -ItemType Directory -Force -Path $folderOut | Out-Null
+          $folderName = "Orca-Portable-$($env:ORCA_SOURCE_VERSION)-Windows-x64-folder.zip"
+          Copy-Item -LiteralPath $folderArchives[0].FullName -Destination (Join-Path $folderOut $folderName)
+          $folderHash = (Get-FileHash -LiteralPath (Join-Path $folderOut $folderName) -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$folderHash  $folderName" | Set-Content -LiteralPath (Join-Path $folderOut 'SHA256SUMS.txt') -Encoding ascii
+          Copy-Item -LiteralPath (Join-Path $out 'BUILD-INFO.txt') -Destination (Join-Path $folderOut 'BUILD-INFO.txt')
+          Write-Host "$folderName ($([Math]::Round($folderArchives[0].Length / 1MB, 1)) MiB) SHA256=$folderHash"
+
+      - name: Upload Orca Windows portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orca-Portable-Windows-x64
+          path: orca-portable-output/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+ }).Count -lt 1) {
+            throw 'Folder ZIP does not contain Orca.exe'
+          }
           $out = Join-Path $env:GITHUB_WORKSPACE 'orca-portable-output'
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           $name = "Orca-Portable-$($env:ORCA_SOURCE_VERSION)-Windows-x64.exe"
@@ -175,6 +221,15 @@ jobs:
         with:
           name: Orca-Portable-Windows-x64
           path: orca-portable-output/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload Orca unpacked-folder ZIP (alternative to self-extracting EXE)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orca-Portable-Folder-Windows-x64
+          path: orca-portable-folder-output/*
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
