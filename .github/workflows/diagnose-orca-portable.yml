@@ -1,0 +1,103 @@
+name: Diagnose Orca Portable Windows startup
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: "Successful ORCA packaging run ID to diagnose"
+        required: true
+        type: string
+        default: "44001353255"
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/diagnose-orca-portable.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  startup-smoke:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      ORCA_BACKGROUND_LAUNCH: "1"
+      ELECTRON_ENABLE_LOGGING: "1"
+      ELECTRON_ENABLE_STACK_DUMPING: "1"
+    steps:
+      - name: Download previous build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Orca-Portable-Windows-x64
+          run-id: ${{ inputs.source_run || '44001353255' }}
+          github-token: ${{ github.token }}
+          path: artifact
+
+      - name: Check file integrity and Windows Defender state
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path diagnostics | Out-Null
+          $exe = @(Get-ChildItem artifact -Filter '*.exe' -File)
+          if ($exe.Count -ne 1) { throw "Expected one EXE, got $($exe.Count)" }
+          Get-FileHash -LiteralPath $exe[0].FullName -Algorithm SHA256 | Format-List
+          Get-AuthenticodeSignature -LiteralPath $exe[0].FullName | Format-List
+          Get-Item -LiteralPath $exe[0].FullName -Stream * -ErrorAction SilentlyContinue | Format-Table
+          Get-MpComputerStatus -ErrorAction SilentlyContinue | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled | Format-List
+          if ($exe[0].Length -lt 50MB) { throw 'EXE too small' }
+
+      - name: Launch portable EXE and capture crash diagnostics
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = @(Get-ChildItem artifact -Filter '*.exe' -File)[0].FullName
+          $exe = (Resolve-Path $exe).Path
+          $out = (Resolve-Path diagnostics).Path
+          $log = Join-Path $out 'electron.log'
+          $stdout = Join-Path $out 'portable-stdout.log'
+          $stderr = Join-Path $out 'portable-stderr.log'
+          $env:ORCA_BACKGROUND_LAUNCH = '1'
+          $env:ORCA_DISABLE_AUTO_UPDATE = '1'
+          $env:ELECTRON_ENABLE_LOGGING = '1'
+          $env:ELECTRON_ENABLE_STACK_DUMPING = '1'
+          $env:ORCA_DIAGNOSTICS_TOKEN_URL = ''
+          Write-Host "Starting $exe"
+          $begin = Get-Date
+          $process = Start-Process -FilePath $exe -ArgumentList @('--enable-logging', "--log-file=$log") -WorkingDirectory (Split-Path $exe) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          Write-Host "Portable stub PID: $($process.Id)"
+          Start-Sleep -Seconds 50
+          $process.Refresh()
+          Write-Host "Stub exited: $($process.HasExited)"
+          if ($process.HasExited) { Write-Host "Stub exit code: $($process.ExitCode)" }
+          $running = @(Get-CimInstance Win32_Process | Where-Object {
+            $_.Name -like 'Orca*' -or $_.CommandLine -like '*Orca-Portable*'
+          } | Select-Object ProcessId, ParentProcessId, Name, CommandLine)
+          $running | Format-Table -AutoSize -Wrap
+          $running | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $out 'running-processes.json')
+          Get-ChildItem -LiteralPath $out | Format-Table Name, Length
+          foreach ($file in @($stderr,$stdout,$log)) {
+            if (Test-Path $file) {
+              Write-Host "=== $file ==="
+              Get-Content $file -Tail 120 -ErrorAction SilentlyContinue
+            }
+          }
+          $events = @(Get-WinEvent -FilterHashtable @{
+            LogName='Application'
+            StartTime=$begin.AddSeconds(-10)
+          } -ErrorAction SilentlyContinue | Where-Object {
+            $_.ProviderName -in @('Application Error','Windows Error Reporting','.NET Runtime') -or $_.Message -match '(?i)orca'
+          } | Select-Object TimeCreated, Id, ProviderName, Message)
+          $events | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $out 'windows-events.json')
+          $events | Format-List
+          if ($running.Count -eq 0) { throw 'No Orca application process remained after 50 seconds (startup may have failed)' }
+          Write-Host "Found $($running.Count) Orca-related processes"
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orca-Portable-Startup-Diagnostics
+          path: diagnostics/*
+          if-no-files-found: warn
+          retention-days: 14
