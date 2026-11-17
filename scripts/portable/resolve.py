@@ -47,6 +47,9 @@ def load_app(path: Path) -> dict:
         raise ValueError(f"{path}: formats must be a unique nonempty list")
     if not set(formats).issubset(FORMATS) or data.get("preferred_format") not in formats:
         raise ValueError(f"{path}: unknown/invalid package format")
+    min_size = data.get("min_size_mb")
+    if not isinstance(min_size, int) or isinstance(min_size, bool) or not 1 <= min_size <= 4096:
+        raise ValueError(f"{path}: min_size_mb must be an integer from 1 to 4096")
     smoke = data.get("smoke")
     if not isinstance(smoke, dict) or smoke.get("mode") not in {"folder-process", "not-verified"}:
         raise ValueError(f"{path}: unsupported smoke test mode")
@@ -57,6 +60,12 @@ def load_app(path: Path) -> dict:
             raise ValueError(f"{path}: process_name must match executable")
         if not isinstance(smoke.get("wait_seconds"), int) or not 5 <= smoke["wait_seconds"] <= 90:
             raise ValueError(f"{path}: invalid smoke wait_seconds")
+        for key, value in smoke.get("env", {}).items():
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key) or not isinstance(value, str):
+                raise ValueError(f"{path}: invalid smoke env declaration")
+        log_env = smoke.get("startup_log_env", "")
+        if log_env and (not re.fullmatch(r"[A-Z_][A-Z0-9_]*", log_env) or not smoke.get("startup_log_marker")):
+            raise ValueError(f"{path}: invalid startup log marker config")
     if smoke["mode"] == "not-verified" and not smoke.get("reason"):
         raise ValueError(f"{path}: missing smoke limitation reason")
     adapter = ROOT / "scripts" / "portable" / "apps" / (app_id + ".ps1")
