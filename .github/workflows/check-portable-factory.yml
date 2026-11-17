@@ -1,0 +1,65 @@
+name: Portable Factory - Validate Registry
+
+on:
+  pull_request:
+    paths:
+      - "apps/**"
+      - "scripts/portable/**"
+      - ".github/workflows/*portable*"
+      - ".github/workflows/*factory*"
+      - "docs/portable-factory/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/**"
+      - "scripts/portable/**"
+      - ".github/workflows/*portable*"
+      - ".github/workflows/*factory*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate manifests and PowerShell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate registered apps and their adapter paths
+        run: |
+          python3 scripts/portable/resolve.py --validate-all
+          python3 scripts/portable/resolve.py --list
+          python3 -m compileall -q scripts/portable/resolve.py
+      - name: Parse PowerShell adapters without executing upstream code
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(Get-ChildItem scripts/portable -Filter '*.ps1' -Recurse)
+          if ($files.Count -eq 0) { throw 'No PowerShell adapters found' }
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Host "::error file=$($file.FullName)::$($_.Message)" }
+              throw "PowerShell syntax invalid: $($file.FullName)"
+            }
+            Write-Host "Valid PowerShell: $($file.FullName)"
+          }
+      - name: Validate GitHub Actions YAML syntax
+        run: |
+          python3 -m pip install --quiet "PyYAML==6.0.3"
+          python3 - <<'PY'
+          from pathlib import Path
+          import yaml
+          for file in sorted(Path('.github/workflows').glob('*.yml')):
+              with file.open(encoding='utf-8') as stream:
+                  doc = yaml.safe_load(stream)
+              if not isinstance(doc, dict) or 'jobs' not in doc:
+                  raise SystemExit(f'{file}: invalid GitHub workflow structure')
+              print(f'YAML OK: {file}')
+          PY

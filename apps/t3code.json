@@ -1,0 +1,18 @@
+{
+  "id": "t3code",
+  "display_name": "T3 Code",
+  "upstream_repo": "pingdotgg/t3code",
+  "default_ref": "v0.1.9",
+  "toolchain": "vite-plus-rust",
+  "target": "windows-x64",
+  "formats": [
+    "exe"
+  ],
+  "preferred_format": "exe",
+  "data_portability": "opt-in-local-profile-not-guaranteed",
+  "smoke": {
+    "mode": "not-verified",
+    "reason": "Windows GUI test not yet automated; downstream CLIs and WSL may be external"
+  },
+  "min_size_mb": 30
+}
