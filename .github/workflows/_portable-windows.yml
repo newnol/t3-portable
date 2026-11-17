@@ -1,0 +1,188 @@
+name: Portable Factory - Shared Windows Build
+
+on:
+  workflow_call:
+    inputs:
+      app_id:
+        description: Registered app ID from apps/*.json
+        required: true
+        type: string
+      upstream_ref:
+        description: Upstream tag/branch/commit (empty uses registered default)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portable-${{ github.workflow }}-${{ github.ref }}-${{ inputs.app_id }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve and validate app manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      app_id: ${{ steps.plan.outputs.app_id }}
+      upstream_repo: ${{ steps.plan.outputs.upstream_repo }}
+      upstream_ref: ${{ steps.plan.outputs.upstream_ref }}
+      toolchain: ${{ steps.plan.outputs.toolchain }}
+    steps:
+      - name: Checkout factory (read-only)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve reviewed app registry and upstream ref
+        id: plan
+        shell: bash
+        env:
+          REQUESTED_APP: ${{ inputs.app_id }}
+          REQUESTED_REF: ${{ inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          python3 scripts/portable/resolve.py --validate-all
+          python3 scripts/portable/resolve.py --app "$REQUESTED_APP" --ref "$REQUESTED_REF"
+
+  build:
+    name: ${{ needs.resolve.outputs.app_id }} / Windows x64
+    needs: resolve
+    runs-on: ${{ needs.resolve.outputs.toolchain == 'vite-plus-rust' && 'windows-2025' || 'windows-2022' }}
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    env:
+      APP_ID: ${{ needs.resolve.outputs.app_id }}
+      UPSTREAM_REPO: ${{ needs.resolve.outputs.upstream_repo }}
+      UPSTREAM_REF: ${{ needs.resolve.outputs.upstream_ref }}
+      CI: "true"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Checkout factory build scripts (no persisted token)
+        uses: actions/checkout@v4
+        with:
+          path: factory
+          persist-credentials: false
+
+      - name: Enable long checkout paths
+        shell: pwsh
+        run: git config --global core.longpaths true
+
+      - name: Checkout upstream source (general)
+        if: needs.resolve.outputs.toolchain != 'vite-plus-rust'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ env.UPSTREAM_REF }}
+          path: upstream
+          fetch-depth: 1
+          filter: blob:none
+          lfs: false
+          submodules: false
+          persist-credentials: false
+
+      # The T3 repo contains a large .repos vendor tree; clone with a sparse
+      # working tree exactly as its previously proven Windows workflow does.
+      - name: Checkout upstream T3 Code (sparse)
+        if: needs.resolve.outputs.toolchain == 'vite-plus-rust'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git init upstream
+          if ($LASTEXITCODE -ne 0) { throw 'git init failed' }
+          git -C upstream remote add origin "https://github.com/$env:UPSTREAM_REPO.git"
+          if ($LASTEXITCODE -ne 0) { throw 'git remote failed' }
+          git -C upstream sparse-checkout set --no-cone '/*' '!/.repos/'
+          if ($LASTEXITCODE -ne 0) { throw 'git sparse-checkout failed' }
+          git -C upstream fetch --no-tags --depth=1 origin $env:UPSTREAM_REF
+          if ($LASTEXITCODE -ne 0) { throw "Cannot fetch $env:UPSTREAM_REF" }
+          git -C upstream -c checkout.workers=0 checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'T3 source checkout failed' }
+
+      - name: Setup pnpm for Orca
+        if: needs.resolve.outputs.toolchain == 'pnpm-bun-native'
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: upstream/package.json
+          run_install: false
+
+      - name: Setup Node.js 24 and pnpm cache for Orca
+        if: needs.resolve.outputs.toolchain == 'pnpm-bun-native'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: upstream/pnpm-lock.yaml
+
+      - name: Setup pinned Bun for Orca
+        if: needs.resolve.outputs.toolchain == 'pnpm-bun-native'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: upstream/config/.bun-version
+
+      - name: Setup pinned Vite+ and Node.js for T3 Code
+        if: needs.resolve.outputs.toolchain == 'vite-plus-rust'
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: upstream/package.json
+          cache: false
+          run-install: false
+
+      - name: Setup Rust (T3 Code)
+        if: needs.resolve.outputs.toolchain == 'vite-plus-rust'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Python for native addons
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Record immutable upstream commit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sha = (git -C upstream rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[0-9a-f]{40}$') { throw 'Invalid upstream SHA' }
+          "UPSTREAM_SHA=$sha" >> $env:GITHUB_ENV
+          Write-Host "Source: $env:UPSTREAM_REPO @ $env:UPSTREAM_REF -> $sha"
+
+      - name: Execute registered app build adapter
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $adapter = Join-Path $env:GITHUB_WORKSPACE "factory/scripts/portable/apps/$env:APP_ID.ps1"
+          if (-not (Test-Path $adapter)) { throw "Adapter missing: $adapter" }
+          & $adapter -SourceDir (Join-Path $env:GITHUB_WORKSPACE 'upstream') -OutputDir (Join-Path $env:GITHUB_WORKSPACE 'portable-output') -SourceRef $env:UPSTREAM_REF -SourceSha $env:UPSTREAM_SHA
+          if (-not $?) { throw 'Portable build adapter failed' }
+
+      - name: Verify artifacts, SHA-256, provenance and runtime policy
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./factory/scripts/portable/verify.ps1 -AppId $env:APP_ID -OutputDir ./portable-output -SourceRef $env:UPSTREAM_REF -SourceSha $env:UPSTREAM_SHA -FactorySha $env:GITHUB_SHA
+          if (-not $?) { throw 'Portable quality gate failed' }
+
+      - name: Upload runtime diagnostics on failure or success
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.resolve.outputs.app_id }}-Windows-x64-build-diagnostics
+          path: ${{ runner.temp }}/portable-factory-diagnostics/*
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload verified portable artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.resolve.outputs.app_id }}-Portable-Windows-x64
+          path: portable-output/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
