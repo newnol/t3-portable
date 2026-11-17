@@ -54,6 +54,27 @@ All T3 Code source code remains subject to the upstream project's [MIT license](
 
 ---
 
+
+### If the single EXE opens no window
+
+The self-extracting `portable` target launches Orca from a temporary directory. Some systems may fail during its startup or block its unsigned binary. We also publish an **unpacked folder ZIP** (`Orca-Portable-Folder-Windows-x64`) as an alternative.
+
+1. Download that artifact from the latest successful build and extract the GitHub Actions artifact ZIP.
+2. Extract the inner `Orca-Portable-<version>-Windows-x64-folder.zip` into a normal writable directory, such as `D:\\Apps\\OrcaPortable`.
+3. Start `Orca.exe` inside the extracted directory. Keep the `resources/`, DLLs, and other folders alongside it.
+
+Do not run `Orca.exe` from inside the ZIP viewer. If Windows flags a downloaded unsigned executable, check Windows Security's protection history before deciding whether it is trusted; do not disable antivirus protections.
+
+Troubleshooting from PowerShell, in the directory containing the EXE:
+
+```powershell
+$env:ORCA_STARTUP_DIAGNOSTICS = "1"
+$env:ORCA_STARTUP_DIAGNOSTICS_FILE = "$PWD\\orca-startup.log"
+.\\Orca.exe --enable-logging
+```
+
+Only share a sanitized log; traces can contain paths, workspace metadata, and other local details. A successful packaging job by itself is not proof that a desktop window opens.
+
 ## Orca portable (Windows x64)
 
 Source: [stablyai/orca](https://github.com/stablyai/orca), the open-source multi-agent development environment.
