@@ -34,17 +34,20 @@ try {
   Assert-Exit 'pnpm build:release'
   pnpm run ensure:electron-runtime
   Assert-Exit 'pnpm ensure:electron-runtime'
-  pnpm exec electron-builder --config config/electron-builder.config.cjs --win portable zip --x64 --publish never --config.directories.output=dist-portable
-  Assert-Exit 'electron-builder portable and zip'
+  # Build a standard Electron directory. No NSIS portable wrapper:
+  # the user extracts the GitHub artifact once and launches Orca.exe.
+  pnpm exec electron-builder --config config/electron-builder.config.cjs --win zip --x64 --publish never --config.directories.output=dist-folder
+  Assert-Exit 'electron-builder Windows ZIP / unpacked directory'
 
-  $dir = Join-Path $SourceDir 'dist-portable'
-  $exe = @(Get-ChildItem -LiteralPath $dir -Filter '*.exe' -File)
-  $zip = @(Get-ChildItem -LiteralPath $dir -Filter '*.zip' -File)
-  if ($exe.Count -ne 1 -or $zip.Count -ne 1) { throw "Expected one portable EXE and one folder ZIP; got $($exe.Count) exe, $($zip.Count) zip" }
-  if (-not (Test-Path (Join-Path $dir 'win-unpacked/Orca.exe'))) { throw 'Orca.exe missing from win-unpacked' }
-  Copy-Item -LiteralPath $exe[0].FullName -Destination (Join-Path $OutputDir "Orca-$version-Windows-x64-portable.exe") -ErrorAction Stop
-  Copy-Item -LiteralPath $zip[0].FullName -Destination (Join-Path $OutputDir "Orca-$version-Windows-x64-folder.zip") -ErrorAction Stop
-  Write-Host "Staged Orca portable v$version with EXE and folder ZIP"
+  $dist = Join-Path $SourceDir 'dist-folder'
+  $unpacked = Join-Path $dist 'win-unpacked'
+  if (-not (Test-Path (Join-Path $unpacked 'Orca.exe'))) { throw 'Orca.exe missing from win-unpacked' }
+  if (-not (Test-Path (Join-Path $unpacked 'resources/app.asar'))) { throw 'Electron app.asar missing from Orca payload' }
+  $target = Join-Path $OutputDir 'orca'
+  if (Test-Path $target) { throw 'Output folder already exists; refusing to mix builds' }
+  Copy-Item -LiteralPath $unpacked -Destination $target -Recurse -Force -ErrorAction Stop
+  if (-not (Test-Path (Join-Path $target 'Orca.exe'))) { throw 'Failed to stage Orca folder payload' }
+  Write-Host "Staged Orca $version as a native directory with DLLs and resources (no runtime extraction)"
 } finally {
   Pop-Location
 }
