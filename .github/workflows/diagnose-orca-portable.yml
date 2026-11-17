@@ -22,7 +22,6 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 15
     env:
-      ORCA_BACKGROUND_LAUNCH: "1"
       ELECTRON_ENABLE_LOGGING: "1"
       ELECTRON_ENABLE_STACK_DUMPING: "1"
     steps:
@@ -47,7 +46,7 @@ jobs:
           Get-MpComputerStatus -ErrorAction SilentlyContinue | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled | Format-List
           if ($exe[0].Length -lt 50MB) { throw 'EXE too small' }
 
-      - name: Launch portable EXE and capture crash diagnostics
+      - name: Launch portable EXE normally and check GUI window
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -57,7 +56,9 @@ jobs:
           $log = Join-Path $out 'electron.log'
           $stdout = Join-Path $out 'portable-stdout.log'
           $stderr = Join-Path $out 'portable-stderr.log'
-          $env:ORCA_BACKGROUND_LAUNCH = '1'
+          Remove-Item Env:ORCA_BACKGROUND_LAUNCH -ErrorAction SilentlyContinue
+          Remove-Item Env:ORCA_E2E_HEADLESS -ErrorAction SilentlyContinue
+          Remove-Item Env:ORCA_E2E_HEADFUL -ErrorAction SilentlyContinue
           $env:ORCA_DISABLE_AUTO_UPDATE = '1'
           $env:ELECTRON_ENABLE_LOGGING = '1'
           $env:ELECTRON_ENABLE_STACK_DUMPING = '1'
@@ -75,6 +76,11 @@ jobs:
           } | Select-Object ProcessId, ParentProcessId, Name, CommandLine)
           $running | Format-Table -AutoSize -Wrap
           $running | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $out 'running-processes.json')
+          $mainWindows = @(Get-Process -Name Orca -ErrorAction SilentlyContinue | Select-Object Id, Responding, MainWindowHandle, MainWindowTitle)
+          $mainWindows | Format-Table -AutoSize
+          $mainWindows | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $out 'main-windows.json')
+          $visibleCount = @($mainWindows | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero }).Count
+          Write-Host "Orca processes with a main window: $visibleCount"
           Get-ChildItem -LiteralPath $out | Format-Table Name, Length
           foreach ($file in @($stderr,$stdout,$log)) {
             if (Test-Path $file) {
@@ -92,6 +98,7 @@ jobs:
           $events | Format-List
           if ($running.Count -eq 0) { throw 'No Orca application process remained after 50 seconds (startup may have failed)' }
           Write-Host "Found $($running.Count) Orca-related processes"
+          if ($visibleCount -eq 0) { throw 'Orca remained running but did not expose a visible main window on the Windows runner' }
 
       - name: Upload diagnostic logs
         if: always()
