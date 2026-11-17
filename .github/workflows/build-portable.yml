@@ -101,17 +101,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $script = (Resolve-Path 'scripts/build-desktop-artifact.ts').Path
           $source = [System.IO.File]::ReadAllText($script)
-          $needle = @'
-      targetArch: options.arch,
-      appVersion,
-      expectWslRuntime:
-'@
-          $replacement = @'
-      targetArch: options.arch,
-      appVersion,
-      fileLimit: options.target === "portable" ? 100 : undefined,
-      expectWslRuntime:
-'@
+          # Normalize line endings, then replace only the validator's Windows call site.
+          $source = $source.Replace("`r`n", "`n")
+          $needle = "      targetArch: options.arch,`n      appVersion,`n      expectWslRuntime:"
+          $replacement = "      targetArch: options.arch,`n      appVersion,`n      fileLimit: options.target === `"portable`" ? 100 : undefined,`n      expectWslRuntime:"
           if (-not $source.Contains($needle) -or $source.IndexOf($needle) -ne $source.LastIndexOf($needle)) {
             throw 'Upstream Windows validator changed; review before patching'
           }
