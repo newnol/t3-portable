@@ -1,0 +1,156 @@
+name: Build T3 Code Portable (Windows x64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "T3 Code upstream tag, branch or commit SHA (e.g. v0.1.9 or main)"
+        required: true
+        default: "v0.1.9"
+        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-portable.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t3-portable-${{ github.ref }}-${{ inputs.upstream_ref || 'v0.1.9' }}
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    name: Windows x64 portable
+    runs-on: windows-2025
+    timeout-minutes: 120
+    env:
+      UPSTREAM_REF: ${{ inputs.upstream_ref || 'v0.1.9' }}
+      CI: "true"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Checkout upstream T3 Code (without large vendored .repos tree)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git init upstream
+          git -C upstream remote add origin https://github.com/pingdotgg/t3code.git
+          git -C upstream sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -C upstream fetch --no-tags --depth=1 origin $env:UPSTREAM_REF
+          if ($LASTEXITCODE -ne 0) { throw "Cannot fetch upstream ref: $env:UPSTREAM_REF" }
+          git -C upstream -c checkout.workers=0 checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Cannot checkout upstream" }
+          $sha = (git -C upstream rev-parse HEAD).Trim()
+          "UPSTREAM_SHA=$sha" >> $env:GITHUB_ENV
+          Write-Host "Building pingdotgg/t3code@$sha"
+
+      - name: Install Vite+ and pinned Node.js
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: upstream/package.json
+          cache: false
+          run-install: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust for Windows x64
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Check toolchains and free disk
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          vp --version
+          node --version
+          python --version
+          cargo --version
+          rustc --version
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $vswhere)) { throw "Visual Studio Build Tools not found" }
+          $install = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1)
+          if (-not $install) { throw "MSVC x64 build tools not found" }
+          $msvc = Get-ChildItem (Join-Path $install 'VC\Tools\MSVC') -Directory | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $msvc -or -not (Test-Path (Join-Path $msvc.FullName 'lib\spectre\x64'))) {
+            throw "Spectre-mitigated MSVC x64 libraries are required by the upstream build"
+          }
+          Get-PSDrive C | Format-Table -AutoSize
+
+      - name: Install upstream workspace dependencies
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          vp install
+          if ($LASTEXITCODE -ne 0) { throw "vp install failed" }
+
+      - name: Build portable Windows executable
+        working-directory: upstream
+        shell: pwsh
+        env:
+          T3CODE_DISABLE_AUTO_UPDATE: "true"
+        run: |
+          vp run dist:desktop:artifact --platform win --target portable --arch x64 --output-dir release-portable --verbose
+          if ($LASTEXITCODE -ne 0) { throw "Windows portable build failed" }
+
+      - name: Verify and prepare downloadable files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE 'upstream\release-portable'
+          if (-not (Test-Path $releaseDir)) { throw "No release-portable directory" }
+          $candidates = @(Get-ChildItem -LiteralPath $releaseDir -File -Filter 'T3-Code-*-x64.exe')
+          if ($candidates.Count -ne 1) {
+            throw "Expected exactly one Windows x64 executable, found $($candidates.Count)"
+          }
+          if ($candidates[0].Length -lt 50MB) { throw "Portable executable is unexpectedly small" }
+          $outputDir = Join-Path $env:GITHUB_WORKSPACE 'portable-output'
+          New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
+          $portableExe = Join-Path $outputDir 'T3-Code-Portable-x64.exe'
+          Copy-Item -LiteralPath $candidates[0].FullName -Destination $portableExe
+          $hash = (Get-FileHash -LiteralPath $portableExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  T3-Code-Portable-x64.exe" | Set-Content -LiteralPath (Join-Path $outputDir 'SHA256SUMS.txt') -Encoding ascii
+          @(
+            "Source: https://github.com/pingdotgg/t3code"
+            "Upstream ref: $env:UPSTREAM_REF"
+            "Upstream SHA: $env:UPSTREAM_SHA"
+            "Platform: Windows x64"
+            "Target: electron-builder portable"
+            "Build UTC: $([DateTime]::UtcNow.ToString('u'))"
+            "Signed: no"
+          ) | Set-Content -LiteralPath (Join-Path $outputDir 'BUILD-INFO.txt') -Encoding utf8
+          $launcher = @(
+            '@echo off'
+            'setlocal EnableExtensions DisableDelayedExpansion'
+            'set "PORTABLE_ROOT=%~dp0"'
+            'set "T3CODE_HOME=%PORTABLE_ROOT%Data\T3"'
+            'set "APPDATA=%PORTABLE_ROOT%Data\Roaming"'
+            'set "LOCALAPPDATA=%PORTABLE_ROOT%Data\Local"'
+            'set "T3CODE_DISABLE_AUTO_UPDATE=true"'
+            'if not exist "%T3CODE_HOME%" mkdir "%T3CODE_HOME%"'
+            'if not exist "%APPDATA%" mkdir "%APPDATA%"'
+            'if not exist "%LOCALAPPDATA%" mkdir "%LOCALAPPDATA%"'
+            'start "" "%PORTABLE_ROOT%T3-Code-Portable-x64.exe"'
+          )
+          [System.IO.File]::WriteAllText(
+            (Join-Path $outputDir 'Run-T3Code-Portable.cmd'),
+            (($launcher -join "`r`n") + "`r`n"),
+            [System.Text.Encoding]::ASCII
+          )
+          Write-Host "Portable executable: $([Math]::Round($candidates[0].Length / 1MB, 1)) MiB"
+          Write-Host "SHA256: $hash"
+
+      - name: Upload Windows portable app
+        uses: actions/upload-artifact@v4
+        with:
+          name: T3-Code-Portable-Windows-x64
+          path: portable-output/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
