@@ -72,7 +72,7 @@ if ($manifest.smoke.mode -eq 'folder-process') {
   Write-Host "Windows smoke passed: $($live.Count) app processes"
   # The Windows runner is disposable; allow Actions to clean up child processes.
 } elseif ($manifest.smoke.mode -eq 'not-verified') {
-  Write-Host "::warning::No runtime smoke test for $AppId: $notes"
+  Write-Host "::warning::No runtime smoke test for $($AppId): $notes"
 } else {
   throw "Unknown smoke mode $($manifest.smoke.mode)"
 }
