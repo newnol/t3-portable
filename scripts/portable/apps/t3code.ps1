@@ -26,7 +26,7 @@ try {
   $script = (Resolve-Path 'scripts/build-desktop-artifact.ts').Path
   $source = [System.IO.File]::ReadAllText($script).Replace("`r`n", "`n")
   $needle = "      targetArch: options.arch,`n      appVersion,`n      expectWslRuntime:"
-  $replacement = "      targetArch: options.arch,`n      appVersion,`n      fileLimit: options.target === `"portable`" ? 100 : undefined,`n      expectWslRuntime:"
+  $replacement = "      targetArch: options.arch,`n      appVersion,`n      fileLimit: options.target === `"zip`" ? 100 : undefined,`n      expectWslRuntime:"
   if (-not $source.Contains($needle) -or $source.IndexOf($needle) -ne $source.LastIndexOf($needle)) {
     throw 'T3 Code upstream validator changed; review portable compatibility patch'
   }
@@ -39,13 +39,23 @@ try {
     $versionArgs = @('--build-version', $version)
   }
   "PORTABLE_APP_VERSION=$version" >> $env:GITHUB_ENV
-  vp run dist:desktop:artifact --platform win --target portable --arch x64 --output-dir release-portable --verbose @versionArgs
-  Assert-Exit 'vp Windows portable artifact'
-  $dir = Join-Path $SourceDir 'release-portable'
-  $exe = @(Get-ChildItem -LiteralPath $dir -File -Filter 'T3-Code-*-x64.exe')
-  if ($exe.Count -ne 1) { throw "Expected exactly one x64 T3 Code portable EXE, found $($exe.Count)" }
-  Copy-Item -LiteralPath $exe[0].FullName -Destination (Join-Path $OutputDir "T3-Code-$version-Windows-x64-portable.exe") -ErrorAction Stop
-  Write-Host "Staged T3 Code portable $version (single EXE only; GUI not verified)"
+  # The upstream build script performs native/runtime validation, then
+  # packages an ordinary ZIP. Expanding it now avoids any runtime unpack step.
+  vp run dist:desktop:artifact --platform win --target zip --arch x64 --output-dir release-folder --verbose @versionArgs
+  Assert-Exit 'vp Windows folder ZIP artifact'
+  $dir = Join-Path $SourceDir 'release-folder'
+  $archive = @(Get-ChildItem -LiteralPath $dir -File -Filter 'T3-Code-*-x64.zip')
+  if ($archive.Count -ne 1) { throw "Expected one Windows desktop ZIP, found $($archive.Count)" }
+  $target = Join-Path $OutputDir 't3code'
+  if (Test-Path $target) { throw 'Output folder already exists; refusing to mix builds' }
+  New-Item -ItemType Directory -Force -Path $target | Out-Null
+  Expand-Archive -LiteralPath $archive[0].FullName -DestinationPath $target -Force
+  $exes = @(Get-ChildItem -LiteralPath $target -File -Filter '*.exe')
+  if ($exes.Count -ne 1) { throw "Expected one root desktop executable, found $($exes.Count)" }
+  if (-not (Test-Path (Join-Path $target 'resources/app.asar'))) {
+    throw 'T3 Code desktop ZIP missing resources/app.asar'
+  }
+  Write-Host "Staged T3 Code $version as an unpacked folder ($($exes[0].Name) plus DLLs/resources); GUI not verified"
 } finally {
   Pop-Location
 }
