@@ -1,0 +1,33 @@
+name: Portable Factory - Windows Integration
+
+on:
+  pull_request:
+    paths:
+      - "apps/**"
+      - "scripts/portable/**"
+      - ".github/workflows/_portable-windows.yml"
+      - ".github/workflows/portable-factory.yml"
+      - ".github/workflows/integration-portable-factory.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portable-factory-integration-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-integrations:
+    name: Integration / ${{ matrix.app_id }}
+    # Do not spend Windows runner minutes executing unreviewed forks.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        app_id: [orca, t3code]
+    uses: ./.github/workflows/_portable-windows.yml
+    with:
+      app_id: ${{ matrix.app_id }}
+      upstream_ref: ""
