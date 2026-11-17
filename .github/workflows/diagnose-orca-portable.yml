@@ -63,6 +63,8 @@ jobs:
           $env:ELECTRON_ENABLE_LOGGING = '1'
           $env:ELECTRON_ENABLE_STACK_DUMPING = '1'
           $env:ORCA_DIAGNOSTICS_TOKEN_URL = ''
+          $env:ORCA_STARTUP_DIAGNOSTICS = '1'
+          $env:ORCA_STARTUP_DIAGNOSTICS_FILE = (Join-Path $out 'bootstrap.log')
           Write-Host "Starting $exe"
           $begin = Get-Date
           $process = Start-Process -FilePath $exe -ArgumentList @('--enable-logging', "--log-file=$log") -WorkingDirectory (Split-Path $exe) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
@@ -82,7 +84,7 @@ jobs:
           $visibleCount = @($mainWindows | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero }).Count
           Write-Host "Orca processes with a main window: $visibleCount"
           Get-ChildItem -LiteralPath $out | Format-Table Name, Length
-          foreach ($file in @($stderr,$stdout,$log)) {
+          foreach ($file in @($stderr,$stdout,$log,(Join-Path $out 'bootstrap.log'))) {
             if (Test-Path $file) {
               Write-Host "=== $file ==="
               Get-Content $file -Tail 120 -ErrorAction SilentlyContinue
