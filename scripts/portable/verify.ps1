@@ -95,7 +95,7 @@ $version = [string]$env:PORTABLE_APP_VERSION
 if (-not $version) { throw 'Build adapter did not set PORTABLE_APP_VERSION' }
 $checksumLines = [System.Collections.Generic.List[string]]::new()
 foreach ($file in ($files | Sort-Object FullName)) {
-  $relative = $file.FullName.Substring($OutputDir.Length).TrimStart([char]'\\', [char]'/').Replace('\\', '/')
+  $relative = $file.FullName.Substring($OutputDir.Length).TrimStart([char]'\', [char]'/').Replace('\', '/')
   $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
   $checksumLines.Add("$hash  $relative")
 }
