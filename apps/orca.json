@@ -6,11 +6,10 @@
   "toolchain": "pnpm-bun-native",
   "target": "windows-x64",
   "formats": [
-    "exe",
-    "zip"
+    "folder"
   ],
-  "preferred_format": "zip",
-  "data_portability": "no-install-only",
+  "preferred_format": "folder",
+  "data_portability": "no-install-standalone-folder-profile-not-isolated",
   "smoke": {
     "mode": "folder-process",
     "executable": "Orca.exe",
