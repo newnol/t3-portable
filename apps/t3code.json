@@ -6,13 +6,13 @@
   "toolchain": "vite-plus-rust",
   "target": "windows-x64",
   "formats": [
-    "exe"
+    "folder"
   ],
-  "preferred_format": "exe",
-  "data_portability": "opt-in-local-profile-not-guaranteed",
+  "preferred_format": "folder",
+  "data_portability": "no-install-standalone-folder-profile-not-isolated",
   "smoke": {
     "mode": "not-verified",
-    "reason": "Windows GUI test not yet automated; downstream CLIs and WSL may be external"
+    "reason": "T3 Code folder structure and native packaging are verified, but an interactive Windows GUI startup test is not yet automated; agent CLIs/WSL may be external."
   },
   "min_size_mb": 30
 }
