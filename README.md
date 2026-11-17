@@ -1,4 +1,8 @@
-# T3 Code Windows Portable
+# Portable Windows Build Collection
+
+> **New:** [Portable Factory v1](docs/portable-factory/README.md) — common CI framework for multiple desktop applications. Use [Actions → Portable Factory - Build App](../../actions/workflows/portable-factory.yml) with `app_id=orca` or `t3code`. The existing standalone workflows remain available during migration.
+
+## Legacy T3 Code workflow
 
 GitHub Actions build of the upstream [T3 Code](https://github.com/pingdotgg/t3code) desktop app for **Windows x64**, using electron-builder's `portable` target. This repository contains the **packaging workflow only**; it does not fork or modify the T3 Code application source.
 
