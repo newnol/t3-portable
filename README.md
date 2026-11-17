@@ -51,3 +51,22 @@ T3-Code-Portable-Windows-x64 (Actions artifact)
 - No GitHub token or signing secrets are passed to the upstream build. Workflow permissions are `contents: read`.
 
 All T3 Code source code remains subject to the upstream project's [MIT license](https://github.com/pingdotgg/t3code/blob/main/LICENSE).
+
+---
+
+## Orca portable (Windows x64)
+
+Source: [stablyai/orca](https://github.com/stablyai/orca), the open-source multi-agent development environment.
+
+This is an **independent** workflow alongside the T3 Code build. It fetches the selected upstream source and compiles a no-installer, single-file Windows executable with electron-builder's `portable` target.
+
+1. Open [Actions → Build Orca Portable (Windows x64)](../../actions/workflows/build-orca-portable.yml).
+2. For another version, choose **Run workflow** and enter `upstream_ref`. Default: `v1.4.261` (a known release tag).
+3. After the run is **successful**, download the `Orca-Portable-Windows-x64` artifact and unzip it.
+4. Start `Orca-Portable-<version>-Windows-x64.exe` directly. No installer is required.
+
+The artifact also contains `SHA256SUMS.txt` and `BUILD-INFO.txt`, including the exact upstream Git SHA. Generated artifacts are retained for 14 days.
+
+**Important:** Portable means the app is runnable without installation. Orca profiles, agent CLI installations, authentication credentials, SSH keys, external tools, and operating-system integration may still use standard Windows profile paths. This workflow does not claim a fully USB-isolated data directory or universal portability of credentials. These builds are **unsigned** and Windows SmartScreen may warn. No upstream code is permanently modified by the workflow; the build is not auto-published to GitHub Releases.
+
+The two app workflows can be run independently, and the ORCA build does not change T3 Code artifacts.
