@@ -182,7 +182,94 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ needs.resolve.outputs.app_id }}-Portable-Windows-x64
-          path: portable-output/*
+          path: portable-output/
           if-no-files-found: error
-          compression-level: 0
+          include-hidden-files: true
+          compression-level: 6
           retention-days: 14
+
+  verify-delivery:
+    name: Verify delivered artifact / ${{ needs.resolve.outputs.app_id }}
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Download EXACT Actions artifact the user receives
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.resolve.outputs.app_id }}-Portable-Windows-x64
+          path: downloaded
+
+      - name: Reject missing files, nested archives and hash mismatches
+        shell: bash
+        env:
+          EXPECTED_APP: ${{ needs.resolve.outputs.app_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("downloaded")
+          app_id = os.environ["EXPECTED_APP"]
+          required = {"BUILD-INFO.json", "SHA256SUMS.txt", "PORTABILITY.txt", app_id}
+          actual_root = {p.name for p in root.iterdir()}
+          if actual_root != required:
+              raise SystemExit(f"Invalid artifact root. Missing={required-actual_root}, unexpected={actual_root-required}")
+
+          payload = root / app_id
+          if not payload.is_dir():
+              raise SystemExit(f"Native app directory {app_id}/ is missing")
+          meta = json.loads((root / "BUILD-INFO.json").read_text(encoding="utf-8"))
+          if meta.get("app_id") != app_id or meta.get("packaging") != "unpacked-folder":
+              raise SystemExit("Artifact metadata does not describe a native folder")
+          exe_path = root / meta["root_executable"]
+          if not exe_path.is_file() or exe_path.suffix.lower() != ".exe":
+              raise SystemExit("Desktop executable missing from downloaded folder")
+          if not (payload / "resources/app.asar").is_file():
+              raise SystemExit("Electron runtime resources missing from delivered artifact")
+
+          checksums = {}
+          for line in (root / "SHA256SUMS.txt").read_text(encoding="utf-8").splitlines():
+              if len(line) < 67 or line[64:66] != "  ":
+                  raise SystemExit(f"Invalid SHA-256 line: {line[:80]!r}")
+              digest, path = line[:64], line[66:]
+              if not all(c in "0123456789abcdef" for c in digest):
+                  raise SystemExit(f"Invalid SHA-256 digest: {digest!r}")
+              if path in checksums or not path.startswith(app_id + "/"):
+                  raise SystemExit(f"Duplicate or out-of-directory path: {path!r}")
+              if ".." in Path(path).parts:
+                  raise SystemExit(f"Unsafe checksum path: {path!r}")
+              checksums[path] = digest
+
+          files = {
+              p.relative_to(root).as_posix(): p
+              for p in payload.rglob("*") if p.is_file()
+          }
+          missing = set(checksums) - set(files)
+          unexpected = set(files) - set(checksums)
+          if missing or unexpected:
+              raise SystemExit(f"Incomplete delivered artifact! Missing={sorted(missing)[:15]}, unexpected={sorted(unexpected)[:15]}")
+          if len(files) != meta["payload_file_count"]:
+              raise SystemExit(f"File count changed after upload: {len(files)} vs {meta['payload_file_count']}")
+
+          byte_count = 0
+          for rel, file in sorted(files.items()):
+              byte_count += file.stat().st_size
+              digest = hashlib.sha256()
+              with file.open("rb") as src:
+                  for block in iter(lambda: src.read(8 * 1024 * 1024), b""):
+                      digest.update(block)
+              if digest.hexdigest() != checksums[rel]:
+                  raise SystemExit(f"Checksum mismatch in the downloadable artifact: {rel}")
+          if byte_count != meta["payload_size_bytes"]:
+              raise SystemExit(f"Payload size changed after upload: {byte_count} vs {meta['payload_size_bytes']}")
+          print(f"DELIVERY VERIFIED: {app_id}, {len(files)} files, {byte_count} bytes, all SHA-256 match")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as report:
+              report.write(f"## Delivered {app_id} folder portable\n\n")
+              report.write(f"Verified **{len(files)}** files and every SHA-256 after downloading the published Actions artifact. **One extraction only.**\n")
+          PY

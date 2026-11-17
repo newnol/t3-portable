@@ -34,17 +34,38 @@ try {
   Assert-Exit 'pnpm build:release'
   pnpm run ensure:electron-runtime
   Assert-Exit 'pnpm ensure:electron-runtime'
-  pnpm exec electron-builder --config config/electron-builder.config.cjs --win portable zip --x64 --publish never --config.directories.output=dist-portable
-  Assert-Exit 'electron-builder portable and zip'
+  # Build a standard Electron directory. No NSIS portable wrapper:
+  # the user extracts the GitHub artifact once and launches Orca.exe.
+  pnpm exec electron-builder --config config/electron-builder.config.cjs --win zip --x64 --publish never --config.directories.output=dist-folder
+  Assert-Exit 'electron-builder Windows ZIP / unpacked directory'
 
-  $dir = Join-Path $SourceDir 'dist-portable'
-  $exe = @(Get-ChildItem -LiteralPath $dir -Filter '*.exe' -File)
-  $zip = @(Get-ChildItem -LiteralPath $dir -Filter '*.zip' -File)
-  if ($exe.Count -ne 1 -or $zip.Count -ne 1) { throw "Expected one portable EXE and one folder ZIP; got $($exe.Count) exe, $($zip.Count) zip" }
-  if (-not (Test-Path (Join-Path $dir 'win-unpacked/Orca.exe'))) { throw 'Orca.exe missing from win-unpacked' }
-  Copy-Item -LiteralPath $exe[0].FullName -Destination (Join-Path $OutputDir "Orca-$version-Windows-x64-portable.exe") -ErrorAction Stop
-  Copy-Item -LiteralPath $zip[0].FullName -Destination (Join-Path $OutputDir "Orca-$version-Windows-x64-folder.zip") -ErrorAction Stop
-  Write-Host "Staged Orca portable v$version with EXE and folder ZIP"
+  $dist = Join-Path $SourceDir 'dist-folder'
+  $unpacked = Join-Path $dist 'win-unpacked'
+  if (-not (Test-Path (Join-Path $unpacked 'Orca.exe'))) { throw 'Orca.exe missing from win-unpacked' }
+  if (-not (Test-Path (Join-Path $unpacked 'resources/app.asar'))) { throw 'Electron app.asar missing from Orca payload' }
+  # ORCA's upstream runtime tree can contain SSH library test fixtures.
+  # Remove credential-shaped *test fixtures* only. Never remove runtime files.
+  $modules = Join-Path $unpacked 'resources/node_modules'
+  if (Test-Path -LiteralPath $modules -PathType Container) {
+    $fixtureNames = @('.env', '.env.local', '.env.production', '.npmrc', '.pypirc', 'id_rsa', 'id_ed25519')
+    $fixtureFolders = @('test', 'tests', '__tests__', 'fixtures')
+    $sensitiveFixtures = @(Get-ChildItem -LiteralPath $modules -File -Recurse -Force | Where-Object {
+      $relative = $_.FullName.Substring($modules.Length).TrimStart([char]'\', [char]'/').Replace('\', '/').ToLowerInvariant()
+      $parts = $relative.Split([char]'/')
+      $inTestTree = @($parts | Where-Object { $_ -in $fixtureFolders }).Count -gt 0
+      $filename = $_.Name.ToLowerInvariant()
+      $inTestTree -and ($filename -in $fixtureNames -or $_.Extension.ToLowerInvariant() -in @('.p12', '.pfx'))
+    })
+    foreach ($fixture in $sensitiveFixtures) {
+      Write-Host "Removing non-runtime test credential fixture: $($fixture.FullName.Substring($modules.Length))"
+      Remove-Item -LiteralPath $fixture.FullName -Force -ErrorAction Stop
+    }
+  }
+  $target = Join-Path $OutputDir 'orca'
+  if (Test-Path $target) { throw 'Output folder already exists; refusing to mix builds' }
+  Copy-Item -LiteralPath $unpacked -Destination $target -Recurse -Force -ErrorAction Stop
+  if (-not (Test-Path (Join-Path $target 'Orca.exe'))) { throw 'Failed to stage Orca folder payload' }
+  Write-Host "Staged Orca $version as a native directory with DLLs and resources (no runtime extraction)"
 } finally {
   Pop-Location
 }

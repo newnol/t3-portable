@@ -2,6 +2,26 @@
 
 > **New:** [Portable Factory v1](docs/portable-factory/README.md) — common CI framework for multiple desktop applications. Use [Actions → Portable Factory - Build App](../../actions/workflows/portable-factory.yml) with `app_id=orca` or `t3code`. The existing standalone workflows remain available during migration.
 
+## Default: unpacked folder portable (recommended)
+
+The **Portable Factory** builds native Windows x64 folders rather than self-extracting one-file EXEs. The GitHub Actions artifact is already a ZIP, so you **extract once** to get:
+
+```text
+orca/
+  Orca.exe
+  *.dll
+  resources/
+    app.asar
+    ...
+BUILD-INFO.json
+SHA256SUMS.txt
+PORTABILITY.txt
+```
+
+For T3 Code the app folder is `t3code/`. Run the desktop executable **inside its extracted folder** and keep every DLL/resources file next to it. It does not unpack itself into `%TEMP%` on every launch. The app's profile and coding-agent credentials may still live in the Windows user profile. There is no GUI-startup guarantee simply because the workflow is green.
+
+The legacy ORCA and T3 workflows below still produce single EXE/inner ZIP artifacts and are retained for compatibility; **use [Portable Factory - Build App](../../actions/workflows/portable-factory.yml) for new builds.**
+
 ## Legacy T3 Code workflow
 
 GitHub Actions build of the upstream [T3 Code](https://github.com/pingdotgg/t3code) desktop app for **Windows x64**, using electron-builder's `portable` target. This repository contains the **packaging workflow only**; it does not fork or modify the T3 Code application source.

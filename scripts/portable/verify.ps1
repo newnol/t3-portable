@@ -1,4 +1,5 @@
-# Shared Portable Factory artifact gate: structure, SHA-256, provenance, Windows process smoke.
+# Shared Portable Factory gate. GitHub Actions itself creates one downloadable ZIP
+# containing the native app folder, so users only extract the artifact once.
 param(
   [Parameter(Mandatory)][string]$AppId,
   [Parameter(Mandatory)][string]$OutputDir,
@@ -10,39 +11,70 @@ $ErrorActionPreference = 'Stop'
 $factory = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $manifest = Get-Content (Join-Path $factory "apps/$AppId.json") -Raw | ConvertFrom-Json
 $OutputDir = (Resolve-Path $OutputDir).Path
-$binary = @(Get-ChildItem -LiteralPath $OutputDir -File | Where-Object { $_.Extension -in @('.exe', '.zip') })
-$minSizeMb = [int]$manifest.min_size_mb
-$formats = @($manifest.formats)
-$expectedCount = $formats.Count
-if ($binary.Count -ne $expectedCount) {
-  throw "Artifact count mismatch: expected $expectedCount ($($formats -join ',')), got $($binary.Count)"
+
+# Contract: portable-output/<app-id>/App.exe, *.dll, resources/, etc.
+# No nested ZIP, no NSIS portable self-extractor and no installer.
+if (@($manifest.formats).Count -ne 1 -or $manifest.formats[0] -ne 'folder') {
+  throw 'Registered app must produce exactly one unpacked folder'
 }
-foreach ($format in $formats) {
-  $extension = if ($format -eq 'exe') { '.exe' } else { '.zip' }
-  $matches = @($binary | Where-Object { $_.Extension -eq $extension })
-  if ($matches.Count -ne 1) { throw "Expected one .$format artifact" }
-  if ($matches[0].Length -lt ($minSizeMb * 1MB)) { throw "Artifact $($matches[0].Name) is smaller than $minSizeMb MiB" }
+$payload = Join-Path $OutputDir $AppId
+if (-not (Test-Path -LiteralPath $payload -PathType Container)) {
+  throw "Missing extracted application folder: $payload"
 }
+$folders = @(Get-ChildItem -LiteralPath $OutputDir -Directory)
+if ($folders.Count -ne 1 -or $folders[0].Name -ne $AppId) {
+  throw "Output must contain one folder named $AppId"
+}
+if (@(Get-ChildItem -LiteralPath $OutputDir -File).Count -ne 0) {
+  throw 'Unexpected root files from adapter; only the app directory is allowed'
+}
+$rootExecutables = @(Get-ChildItem -LiteralPath $payload -File -Filter '*.exe')
+if ($rootExecutables.Count -ne 1) {
+  throw "Expected exactly one desktop EXE at the app folder root, found $($rootExecutables.Count)"
+}
+$resources = Join-Path $payload 'resources/app.asar'
+if (-not (Test-Path -LiteralPath $resources -PathType Leaf)) {
+  throw 'Electron resources/app.asar missing: cannot start packaged desktop app'
+}
+$files = @(Get-ChildItem -LiteralPath $payload -File -Recurse -Force)
+# Hidden runtime files must be preserved, but common private credentials cannot be published.
+$blockedPaths = [System.Collections.Generic.List[string]]::new()
+foreach ($file in $files) {
+  $relative = $file.FullName.Substring($payload.Length).TrimStart([char]'\', [char]'/').Replace('\', '/')
+  $segments = $relative.Split([char]'/')
+  $basename = $file.Name.ToLowerInvariant()
+  $blockedFolders = @('.git', '.ssh', '.aws')
+  $blockedNames = @('.env', '.env.local', '.env.production', '.npmrc', '.pypirc', 'id_rsa', 'id_ed25519')
+  $blocked = @($segments | Where-Object { $_ -in $blockedFolders }).Count -gt 0
+  if ($blocked -or $basename -in $blockedNames -or $file.Extension.ToLowerInvariant() -in @('.p12', '.pfx')) {
+    $blockedPaths.Add($relative)
+  }
+}
+if ($blockedPaths.Count -gt 0) {
+  $blockedPaths | Sort-Object | ForEach-Object { Write-Host "::warning::Blocked bundled credential path: $_" }
+  throw "Refusing to publish $($blockedPaths.Count) secret-like file paths from the application payload"
+}
+$nativeDlls = @($files | Where-Object { $_.Extension -eq '.dll' })
+if ($nativeDlls.Count -eq 0) {
+  throw 'Native Electron DLLs are missing from the unpacked application'
+}
+$payloadSize = [long]0
+foreach ($file in $files) { $payloadSize += $file.Length }
+$minSize = [int]$manifest.min_size_mb
+if ($payloadSize -lt ($minSize * 1MB)) {
+  throw "Unpacked application is smaller than minimum $minSize MiB"
+}
+Write-Host "Directory payload: $($files.Count) files, $($nativeDlls.Count) DLLs, $([Math]::Round($payloadSize/1MB, 1)) MiB"
+
 $smokeResult = 'not-verified'
 $notes = [string]$manifest.smoke.reason
 $logDir = Join-Path $env:RUNNER_TEMP 'portable-factory-diagnostics'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 if ($manifest.smoke.mode -eq 'folder-process') {
-  $archive = @($binary | Where-Object Extension -eq '.zip')[0]
-  Add-Type -AssemblyName System.IO.Compression
-  $zip = [System.IO.Compression.ZipFile]::OpenRead($archive.FullName)
-  try {
-    $expectedExe = [string]$manifest.smoke.executable
-    $exeEntries = @($zip.Entries | Where-Object { $_.FullName.Replace('\\','/') -eq $expectedExe })
-    if ($exeEntries.Count -ne 1) { throw "ZIP must contain exactly one root $expectedExe" }
-  } finally {
-    $zip.Dispose()
+  $expectedExe = [string]$manifest.smoke.executable
+  if ($rootExecutables[0].Name -ne $expectedExe) {
+    throw "Expected desktop EXE $expectedExe, got $($rootExecutables[0].Name)"
   }
-  $unpack = Join-Path $env:RUNNER_TEMP "portable-factory-smoke-$AppId"
-  if (Test-Path $unpack) { Remove-Item $unpack -Recurse -Force }
-  Expand-Archive -LiteralPath $archive.FullName -DestinationPath $unpack -Force
-  $exePath = Join-Path $unpack $expectedExe
-  if (-not (Test-Path $exePath)) { throw 'Unpacked app executable is missing' }
   foreach ($entry in $manifest.smoke.env.PSObject.Properties) {
     [Environment]::SetEnvironmentVariable([string]$entry.Name, [string]$entry.Value, 'Process')
   }
@@ -50,81 +82,95 @@ if ($manifest.smoke.mode -eq 'folder-process') {
   if ($manifest.smoke.startup_log_env) {
     [Environment]::SetEnvironmentVariable([string]$manifest.smoke.startup_log_env, $startupLog, 'Process')
   }
-  $process = Start-Process -FilePath $exePath -WorkingDirectory $unpack -PassThru -ErrorAction Stop
-  Write-Host "Windows smoke: started $exePath (PID $($process.Id))"
+  $p = Start-Process -FilePath $rootExecutables[0].FullName -WorkingDirectory $payload -PassThru -ErrorAction Stop
+  Write-Host "Windows folder smoke: started PID $($p.Id) from $payload"
   Start-Sleep -Seconds ([int]$manifest.smoke.wait_seconds)
-  $process.Refresh()
+  $p.Refresh()
   $live = @(Get-CimInstance Win32_Process -Filter "Name = '$($manifest.smoke.process_name)'" | Where-Object {
-    $_.ExecutablePath -and $_.ExecutablePath.StartsWith($unpack, [StringComparison]::OrdinalIgnoreCase)
+    $_.ExecutablePath -and $_.ExecutablePath.StartsWith($payload, [StringComparison]::OrdinalIgnoreCase)
   })
-  $live | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath | ConvertTo-Json -Depth 4 |
-    Set-Content -Path (Join-Path $logDir 'processes.json') -Encoding utf8
-  if ($live.Count -eq 0) { throw 'Windows startup smoke failed: no unpacked app process survived' }
+  $live | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath |
+    ConvertTo-Json -Depth 4 | Set-Content (Join-Path $logDir 'processes.json') -Encoding utf8
+  if ($live.Count -eq 0) { throw 'Windows smoke failed: application process did not remain alive' }
   if ($manifest.smoke.startup_log_marker) {
-    if (-not (Test-Path $startupLog)) { throw 'Windows smoke did not create a startup log' }
+    if (-not (Test-Path -LiteralPath $startupLog)) { throw 'Electron bootstrap log missing' }
     $bootLog = Get-Content -LiteralPath $startupLog -Raw
     if (-not $bootLog.Contains([string]$manifest.smoke.startup_log_marker)) {
-      throw 'Windows smoke did not produce the required startup marker'
+      throw 'Required Electron bootstrap marker missing'
     }
   }
   $smokeResult = 'process-smoke-passed'
-  $notes = 'A Windows CI runner started the unpacked application, observed its live process and any configured log marker. GUI visibility and user settings are not verified.'
-  Write-Host "Windows smoke passed: $($live.Count) app processes"
-  # The Windows runner is disposable; allow Actions to clean up child processes.
+  $notes = 'Unpacked app launched on a Windows CI runner and passed its configured process/bootstrap check. Interactive GUI, profile portability, and launch latency on user hardware remain unverified.'
+  Write-Host "Folder-process smoke passed: $($live.Count) app processes"
 } elseif ($manifest.smoke.mode -eq 'not-verified') {
   Write-Host "::warning::No runtime smoke test for $($AppId): $notes"
 } else {
-  throw "Unknown smoke mode $($manifest.smoke.mode)"
+  throw "Unsupported runtime smoke mode $($manifest.smoke.mode)"
 }
 
-$version = $env:PORTABLE_APP_VERSION
-if (-not $version) { throw 'Build adapter did not report PORTABLE_APP_VERSION' }
-$checksums = foreach ($file in ($binary | Sort-Object Name)) {
+$version = [string]$env:PORTABLE_APP_VERSION
+if (-not $version) { throw 'Build adapter did not set PORTABLE_APP_VERSION' }
+$checksumLines = [System.Collections.Generic.List[string]]::new()
+foreach ($file in ($files | Sort-Object FullName)) {
+  $relative = $file.FullName.Substring($OutputDir.Length).TrimStart([char]'\', [char]'/').Replace('\', '/')
   $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-  "$hash  $($file.Name)"
+  $checksumLines.Add("$hash  $relative")
 }
-[System.IO.File]::WriteAllLines((Join-Path $OutputDir 'SHA256SUMS.txt'), [string[]]$checksums, [System.Text.Encoding]::ASCII)
-$record = [ordered]@{
-  schema = 1
+[System.IO.File]::WriteAllLines(
+  (Join-Path $OutputDir 'SHA256SUMS.txt'),
+  $checksumLines,
+  [System.Text.UTF8Encoding]::new($false)
+)
+$provenance = [ordered]@{
+  schema = 2
   app_id = $manifest.id
   app_name = $manifest.display_name
   app_version = $version
   platform = $manifest.target
+  packaging = 'unpacked-folder'
+  artifact_extraction_steps = 1
+  root_executable = "$AppId/$($rootExecutables[0].Name)"
+  payload_file_count = $files.Count
+  payload_size_bytes = $payloadSize
   upstream_repository = $manifest.upstream_repo
   upstream_ref = $SourceRef
   upstream_commit = $SourceSha
   factory_commit = $FactorySha
   build_utc = [DateTime]::UtcNow.ToString('o')
-  formats = $formats
-  preferred_format = $manifest.preferred_format
-  portability = $manifest.data_portability
   code_signing = 'unsigned'
+  profile_isolation = 'not-guaranteed'
   smoke_status = $smokeResult
   smoke_limitations = $notes
 }
-$record | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDir 'BUILD-INFO.json') -Encoding utf8
+$provenance | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDir 'BUILD-INFO.json') -Encoding utf8
 @(
-  "This application is not an installer."
-  "Preferred download: $($manifest.preferred_format)"
-  "Portable means no installation; application data, credentials, CLIs and OS integrations may not be portable."
-  "Source: https://github.com/$($manifest.upstream_repo) @ $SourceSha"
+  'One-step unpacked Windows desktop portable.'
+  'Extract the GitHub Actions artifact ZIP to a writable directory. Then run:'
+  "  $AppId/$($rootExecutables[0].Name)"
+  'Keep the EXE, DLLs, resources and other files in the same app directory.'
+  'Never run the executable from inside an archive manager.'
+  'The application does not require an installer or a runtime self-extraction step.'
+  'Application settings, credentials, CLIs and OS integrations can still use your Windows profile.'
+  "Upstream: https://github.com/$($manifest.upstream_repo) @ $SourceSha"
   "Smoke status: $smokeResult"
   "Limitations: $notes"
-  "Unverified unsigned binaries may be flagged by Windows SmartScreen. Never disable antivirus protection to run them."
+  'Unsigned binaries may trigger Windows SmartScreen. Do not disable antivirus protection.'
 ) | Set-Content -LiteralPath (Join-Path $OutputDir 'PORTABILITY.txt') -Encoding utf8
+
 if ($env:GITHUB_STEP_SUMMARY) {
   @(
-    "## $($manifest.display_name) Windows Portable"
-    ""
-    "| Field | Value |"
-    "| --- | --- |"
+    "## $($manifest.display_name) Windows folder portable"
+    ''
+    '| Field | Value |'
+    '| --- | --- |'
+    "| Root executable | $AppId/$($rootExecutables[0].Name) |"
+    "| Payload | $($files.Count) files / $([Math]::Round($payloadSize/1MB, 1)) MiB |"
+    '| Packaging | Folder directly inside one GitHub Actions artifact ZIP |'
     "| Source | $($manifest.upstream_repo) @ $SourceSha |"
     "| Version | $version |"
-    "| Formats | $($formats -join ', ') |"
-    "| Preferred | $($manifest.preferred_format) |"
-    "| Runtime check | $smokeResult |"
-    "| GUI tested | No |"
-    "| Signing | Unsigned |"
+    "| Runtime smoke | $smokeResult |"
+    '| GUI tested | No |'
+    '| Signed | No |'
   ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
 }
-Write-Host "Artifacts verified, SHA256SUMS.txt and BUILD-INFO.json recorded."
+Write-Host "Folder payload verified, file checksums and BUILD-INFO.json recorded."
